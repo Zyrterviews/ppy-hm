@@ -1,0 +1,172 @@
+package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+templ Layout(title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="UTF-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			<title>{ title }</title>
+			<script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.7/dist/htmx.js" integrity="sha384-yWakaGAFicqusuwOYEmoRjLNOC+6OFsdmwC2lbGQaRELtuVEqNzt11c2J711DeCZ" crossorigin="anonymous"></script>
+			<style>
+			body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+			.container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+			h1 { color: #2563eb; margin-bottom: 30px; }
+			.form-group { margin-bottom: 20px; }
+			label { display: block; margin-bottom: 5px; font-weight: 600; color: #374151; }
+			input, select { width: 100%; padding: 12px; border: 2px solid #d1d5db; border-radius: 8px; font-size: 16px; }
+			input:focus, select:focus { outline: none; border-color: #2563eb; }
+			button { background: #2563eb; color: white; padding: 12px 24px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; margin-top: 10px; }
+			button:hover { background: #1d4ed8; }
+			.leg { border: 1px solid #e5e7eb; padding: 20px; margin-bottom: 15px; border-radius: 8px; }
+			.leg h3 { margin-top: 0; color: #374151; }
+			.coords { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+			.add-leg { background: #059669; }
+			.add-leg:hover { background: #047857; }
+			.result { margin-top: 30px; padding: 20px; background: #f0f9ff; border-left: 4px solid #0ea5e9; border-radius: 8px; }
+			.error { background: #fef2f2; border-left-color: #ef4444; color: #dc2626; }
+			.success { background: #f0fdf4; border-left-color: #22c55e; color: #16a34a; }
+			.breakdown { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-top: 15px; }
+			.breakdown-item { text-align: center; padding: 10px; background: white; border-radius: 6px; }
+			.breakdown-item .value { font-size: 18px; font-weight: 600; color: #2563eb; }
+			.breakdown-item .label { font-size: 12px; color: #6b7280; text-transform: uppercase; }
+		</style>
+		</head>
+		<body>
+			<div class="container">
+				{ children... }
+			</div>
+		</body>
+	</html>
+}
+
+templ Index() {
+	@Layout("Poppy Journey Planner") {
+		<h1>🚗 Poppy Journey Planner</h1>
+		<form hx-post="/plan" hx-target="#result" hx-indicator="#loading">
+			<div id="legs">
+				@LegForm(1)
+			</div>
+			<button type="button" class="add-leg" onclick="addLeg()">+ Add Another Leg</button>
+			<br/>
+			<button type="submit">Plan Journey & Calculate Cost</button>
+			<div id="loading" class="htmx-indicator" style="margin-top: 10px; color: #6b7280;">
+				Planning your journey...
+			</div>
+		</form>
+		<div id="result"></div>
+		<script>
+			let legCount = 1;
+			
+			function addLeg() {
+				legCount++;
+				const legsDiv = document.getElementById('legs');
+				const newLegHTML = `
+					<div class="leg">
+						<h3>Leg ${legCount} <button type="button" onclick="removeLeg(this)" style="float: right; background: #ef4444; font-size: 12px; padding: 4px 8px;">Remove</button></h3>
+						<div class="coords">
+							<div class="form-group">
+								<label>Start Latitude</label>
+								<input type="number" step="any" name="legs[${legCount-1}].startLat" placeholder="50.8355" required/>
+							</div>
+							<div class="form-group">
+								<label>Start Longitude</label>
+								<input type="number" step="any" name="legs[${legCount-1}].startLng" placeholder="4.3573" required/>
+							</div>
+							<div class="form-group">
+								<label>End Latitude</label>
+								<input type="number" step="any" name="legs[${legCount-1}].endLat" placeholder="50.8245" required/>
+							</div>
+							<div class="form-group">
+								<label>End Longitude</label>
+								<input type="number" step="any" name="legs[${legCount-1}].endLng" placeholder="4.3635" required/>
+							</div>
+						</div>
+						<div class="form-group">
+							<label>Pause Duration (minutes)</label>
+							<input type="number" name="legs[${legCount-1}].pauseMinutes" placeholder="0" min="0" value="0"/>
+						</div>
+					</div>
+				`;
+				legsDiv.insertAdjacentHTML('beforeend', newLegHTML);
+			}
+			
+			function removeLeg(button) {
+				if (document.querySelectorAll('.leg').length > 1) {
+					button.closest('.leg').remove();
+				}
+			}
+		</script>
+	}
+}
+
+templ LegForm(legNumber int) {
+	<div class="leg">
+		<h3>Leg { strconv.Itoa(legNumber) }</h3>
+		<div class="coords">
+			<div class="form-group">
+				<label>Start Latitude</label>
+				<input type="number" step="any" name={ fmt.Sprintf("legs[%d].startLat", legNumber-1) } placeholder="50.8355" required/>
+			</div>
+			<div class="form-group">
+				<label>Start Longitude</label>
+				<input type="number" step="any" name={ fmt.Sprintf("legs[%d].startLng", legNumber-1) } placeholder="4.3573" required/>
+			</div>
+			<div class="form-group">
+				<label>End Latitude</label>
+				<input type="number" step="any" name={ fmt.Sprintf("legs[%d].endLat", legNumber-1) } placeholder="50.8245" required/>
+			</div>
+			<div class="form-group">
+				<label>End Longitude</label>
+				<input type="number" step="any" name={ fmt.Sprintf("legs[%d].endLng", legNumber-1) } placeholder="4.3635" required/>
+			</div>
+		</div>
+		<div class="form-group">
+			<label>Pause Duration (minutes)</label>
+			<input type="number" name={ fmt.Sprintf("legs[%d].pauseMinutes", legNumber-1) } placeholder="0" min="0" value="0"/>
+		</div>
+	</div>
+}
+
+templ JourneyResult(plan *JourneyPlan) {
+	<div class="result success">
+		<h2>✅ Journey Planned Successfully!</h2>
+		<p><strong>Vehicle:</strong> { plan.Vehicle.Model.Make } { plan.Vehicle.Model.Name } ({ plan.Vehicle.Plate })</p>
+		<p><strong>Total Cost:</strong> €{ fmt.Sprintf("%.2f", plan.TotalCost) }</p>
+		<p><strong>Pricing Model:</strong> { plan.PricingModel }</p>
+		<div class="breakdown">
+			<div class="breakdown-item">
+				<div class="value">€{ fmt.Sprintf("%.2f", plan.CostBreakdown.UnlockFee) }</div>
+				<div class="label">Unlock Fee</div>
+			</div>
+			<div class="breakdown-item">
+				<div class="value">€{ fmt.Sprintf("%.2f", plan.CostBreakdown.BookingCost) }</div>
+				<div class="label">Booking</div>
+			</div>
+			<div class="breakdown-item">
+				<div class="value">€{ fmt.Sprintf("%.2f", plan.CostBreakdown.TravelCost) }</div>
+				<div class="label">Travel</div>
+			</div>
+			<div class="breakdown-item">
+				<div class="value">€{ fmt.Sprintf("%.2f", plan.CostBreakdown.PauseCost) }</div>
+				<div class="label">Pause</div>
+			</div>
+			<div class="breakdown-item">
+				<div class="value">{ fmt.Sprintf("%.1f", plan.CostBreakdown.WalkingTime) }m</div>
+				<div class="label">Walking</div>
+			</div>
+		</div>
+	</div>
+}
+
+templ ErrorResult(message string) {
+	<div class="result error">
+		<h2>❌ Planning Failed</h2>
+		<p>{ message }</p>
+	</div>
+}

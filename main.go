@@ -1,4 +1,4 @@
-//nolint:package-comments,revive,forbidigo,mnd,prealloc,exhaustruct,err113
+//nolint:package-comments,revive,forbidigo,mnd,prealloc,exhaustruct,err113,gosec,errchkjson
 package main
 
 import (
@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/paulmach/orb"
@@ -578,42 +580,209 @@ func planJourney(
 	return plan, nil
 }
 
-func printJourneyPlan(plan *JourneyPlan) {
-	fmt.Printf("\n=== OPTIMAL JOURNEY PLAN ===\n")
-	fmt.Printf(
-		"Vehicle: %s %s (%s)\n",
-		plan.Vehicle.Model.Make,
-		plan.Vehicle.Model.Name,
-		plan.Vehicle.Plate,
-	)
-	fmt.Printf(
-		"Location: %.6f, %.6f\n",
-		plan.Vehicle.LocationLatitude,
-		plan.Vehicle.LocationLongitude,
-	)
-	fmt.Printf("Pricing Model: %s\n", plan.PricingModel)
-	fmt.Printf("Total Cost: €%.2f\n", plan.TotalCost)
+func planJourneyHandler(client *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			respondJSON(w, http.StatusMethodNotAllowed, APIResponse{
+				Success: false,
+				Error:   "Method not allowed",
+			})
 
-	fmt.Printf("\n--- Cost Breakdown ---\n")
-	fmt.Printf("Unlock Fee: €%.2f\n", plan.CostBreakdown.UnlockFee)
-	fmt.Printf("Booking Cost: €%.2f\n", plan.CostBreakdown.BookingCost)
-	fmt.Printf("Travel Cost: €%.2f\n", plan.CostBreakdown.TravelCost)
-	fmt.Printf("Pause Cost: €%.2f\n", plan.CostBreakdown.PauseCost)
-	fmt.Printf("Walking Time: %.1f minutes\n", plan.CostBreakdown.WalkingTime)
-
-	fmt.Printf("\n--- Journey Details ---\n")
-
-	for i, leg := range plan.Journey.Legs {
-		fmt.Printf("Leg %d: (%.6f, %.6f) → (%.6f, %.6f)\n",
-			i+1, leg.StartLocation.Lat, leg.StartLocation.Lng,
-			leg.EndLocation.Lat, leg.EndLocation.Lng)
-
-		if leg.PauseMinutes > 0 {
-			fmt.Printf("  Pause: %d minutes\n", leg.PauseMinutes)
+			return
 		}
+
+		var requestData struct {
+			Journey Journey `json:"journey"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+			respondJSON(w, http.StatusBadRequest, APIResponse{
+				Success: false,
+				Error:   "Invalid JSON request body",
+			})
+
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		plan, err := planJourney(ctx, client, requestData.Journey)
+		if err != nil {
+			respondJSON(w, http.StatusBadRequest, APIResponse{
+				Success: false,
+				Error:   err.Error(),
+			})
+
+			return
+		}
+
+		respondJSON(w, http.StatusOK, APIResponse{
+			Success: true,
+			Data:    plan,
+		})
 	}
 }
 
+func vehiclesHandler(client *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			respondJSON(w, http.StatusMethodNotAllowed, APIResponse{
+				Success: false,
+				Error:   "Method not allowed",
+			})
+
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		vehicles, err := fetchVehicles(ctx, client)
+		if err != nil {
+			respondJSON(w, http.StatusInternalServerError, APIResponse{
+				Success: false,
+				Error:   err.Error(),
+			})
+
+			return
+		}
+
+		respondJSON(w, http.StatusOK, APIResponse{
+			Success: true,
+			Data:    vehicles,
+		})
+	}
+}
+
+func healthHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			respondJSON(w, http.StatusMethodNotAllowed, APIResponse{
+				Success: false,
+				Error:   "Method not allowed",
+			})
+
+			return
+		}
+
+		respondJSON(w, http.StatusOK, APIResponse{
+			Success: true,
+			Data: map[string]any{
+				"status":  "healthy",
+				"version": "1.0.0",
+				"service": "poppy-journey-planner",
+			},
+		})
+	}
+}
+
+func indexHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		_ = Index().Render(r.Context(), w)
+	}
+}
+
+func planHandler(client *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			_ = ErrorResult("Failed to parse form data").Render(r.Context(), w)
+
+			return
+		}
+
+		journey := Journey{Legs: []TripLeg{}}
+
+		for key, values := range r.Form {
+			if len(values) == 0 {
+				continue
+			}
+
+			if !strings.Contains(key, "legs[") || !strings.Contains(key, "]") {
+				continue
+			}
+
+			parts := strings.Split(key, "].")
+			if len(parts) != 2 {
+				continue
+			}
+
+			legIndexStr := strings.TrimPrefix(parts[0], "legs[")
+			fieldName := parts[1]
+
+			legIndex, err := strconv.Atoi(legIndexStr)
+			if err != nil {
+				continue
+			}
+
+			for len(journey.Legs) <= legIndex {
+				journey.Legs = append(journey.Legs, TripLeg{})
+			}
+
+			value := values[0]
+
+			switch fieldName {
+			case "startLat":
+				if lat, err := strconv.ParseFloat(value, 64); err == nil {
+					journey.Legs[legIndex].StartLocation.Lat = lat
+				}
+			case "startLng":
+				if lng, err := strconv.ParseFloat(value, 64); err == nil {
+					journey.Legs[legIndex].StartLocation.Lng = lng
+				}
+			case "endLat":
+				if lat, err := strconv.ParseFloat(value, 64); err == nil {
+					journey.Legs[legIndex].EndLocation.Lat = lat
+				}
+			case "endLng":
+				if lng, err := strconv.ParseFloat(value, 64); err == nil {
+					journey.Legs[legIndex].EndLocation.Lng = lng
+				}
+			case "pauseMinutes":
+				if pause, err := strconv.Atoi(value); err == nil {
+					journey.Legs[legIndex].PauseMinutes = pause
+				}
+			}
+		}
+
+		validLegs := []TripLeg{}
+
+		for _, leg := range journey.Legs {
+			if leg.StartLocation.Lat == 0 &&
+				leg.StartLocation.Lng == 0 &&
+				leg.EndLocation.Lat == 0 &&
+				leg.EndLocation.Lng == 0 {
+				continue
+			}
+
+			validLegs = append(validLegs, leg)
+		}
+
+		journey.Legs = validLegs
+
+		if len(journey.Legs) == 0 {
+			_ = ErrorResult(
+				"Please add at least one valid journey leg",
+			).Render(r.Context(), w)
+
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		plan, err := planJourney(ctx, client, journey)
+		if err != nil {
+			_ = ErrorResult(
+				"Planning failed: "+err.Error(),
+			).Render(r.Context(), w)
+
+			return
+		}
+
+		_ = JourneyResult(plan).Render(r.Context(), w)
+	}
+}
 
 func newHTTPClient(timeout time.Duration) *http.Client {
 	dialer := net.Dialer{
@@ -645,123 +814,41 @@ func newHTTPClient(timeout time.Duration) *http.Client {
 }
 
 type APIResponse struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
+	Success bool   `json:"success"`
+	Data    any    `json:"data,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 func respondJSON(w http.ResponseWriter, status int, response APIResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+
 	_ = json.NewEncoder(w).Encode(response)
-}
-
-func planJourneyHandler(client *http.Client) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			respondJSON(w, http.StatusMethodNotAllowed, APIResponse{
-				Success: false,
-				Error:   "Method not allowed",
-			})
-			return
-		}
-
-		var requestData struct {
-			Journey Journey `json:"journey"`
-		}
-
-		if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
-			respondJSON(w, http.StatusBadRequest, APIResponse{
-				Success: false,
-				Error:   "Invalid JSON request body",
-			})
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-
-		plan, err := planJourney(ctx, client, requestData.Journey)
-		if err != nil {
-			respondJSON(w, http.StatusBadRequest, APIResponse{
-				Success: false,
-				Error:   err.Error(),
-			})
-			return
-		}
-
-		respondJSON(w, http.StatusOK, APIResponse{
-			Success: true,
-			Data:    plan,
-		})
-	}
-}
-
-func vehiclesHandler(client *http.Client) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			respondJSON(w, http.StatusMethodNotAllowed, APIResponse{
-				Success: false,
-				Error:   "Method not allowed",
-			})
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-
-		vehicles, err := fetchVehicles(ctx, client)
-		if err != nil {
-			respondJSON(w, http.StatusInternalServerError, APIResponse{
-				Success: false,
-				Error:   err.Error(),
-			})
-			return
-		}
-
-		respondJSON(w, http.StatusOK, APIResponse{
-			Success: true,
-			Data:    vehicles,
-		})
-	}
-}
-
-func healthHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			respondJSON(w, http.StatusMethodNotAllowed, APIResponse{
-				Success: false,
-				Error:   "Method not allowed",
-			})
-			return
-		}
-
-		respondJSON(w, http.StatusOK, APIResponse{
-			Success: true,
-			Data: map[string]interface{}{
-				"status":  "healthy",
-				"version": "1.0.0",
-				"service": "poppy-journey-planner",
-			},
-		})
-	}
 }
 
 func main() {
 	client := newHTTPClient(10 * time.Second)
 
-	http.HandleFunc("/api/v1/plan-journey", planJourneyHandler(client))
-	http.HandleFunc("/api/v1/vehicles", vehiclesHandler(client))
-	http.HandleFunc("/api/v1/health", healthHandler())
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /", indexHandler())
+	mux.HandleFunc("POST /plan", planHandler(client))
+
+	mux.HandleFunc("POST /api/v1/plan-journey", planJourneyHandler(client))
+	mux.HandleFunc("GET /api/v1/vehicles", vehiclesHandler(client))
+	mux.HandleFunc("GET /api/v1/health", healthHandler())
 
 	port := "8080"
-	fmt.Printf("Starting Poppy Journey Planner API on port %s\n", port)
-	fmt.Println("Endpoints:")
+	fmt.Printf("Starting Poppy Journey Planner on port %s\n", port)
+	fmt.Println("Frontend:")
+	fmt.Println("  GET  / (Web UI)")
+	fmt.Println("  POST /plan (HTMX endpoint)")
+	fmt.Println("API Endpoints:")
 	fmt.Println("  POST /api/v1/plan-journey")
 	fmt.Println("  GET  /api/v1/vehicles")
 	fmt.Println("  GET  /api/v1/health")
 
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		fmt.Printf("Failed to start server: %v\n", err)
 	}
 }
