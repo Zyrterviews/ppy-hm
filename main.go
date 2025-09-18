@@ -456,9 +456,21 @@ func calculateCostForModel(
 		)
 		totalDistanceKm += distance
 
-		totalPauseMinutes += float64(leg.PauseMinutes)
+		if leg.PauseMinutes > 0 {
+			pauseMinutes := float64(leg.PauseMinutes)
+			if isInParkingZone(leg.EndLocation, geozone) {
+				totalPauseMinutes += pauseMinutes
+			} else {
+				totalPauseMinutes += pauseMinutes * 1.5
+			}
+		}
 
 		currentLocation = leg.EndLocation
+	}
+
+	finalLocation := journey.Legs[len(journey.Legs)-1].EndLocation
+	if geozone != nil && !isInParkingZone(finalLocation, geozone) {
+		return nil
 	}
 
 	bookingMinutesToCharge := math.Max(
@@ -602,47 +614,6 @@ func printJourneyPlan(plan *JourneyPlan) {
 	}
 }
 
-func getTestScenarios() []Journey {
-	return []Journey{
-		{
-			Legs: []TripLeg{
-				{
-					StartLocation: Location{Lat: 50.8355, Lng: 4.3573},
-					EndLocation:   Location{Lat: 50.8245, Lng: 4.3635},
-					PauseMinutes:  120,
-				},
-				{
-					StartLocation: Location{Lat: 50.8245, Lng: 4.3635},
-					EndLocation:   Location{Lat: 50.8275, Lng: 4.3745},
-					PauseMinutes:  0,
-				},
-			},
-		},
-		{
-			Legs: []TripLeg{
-				{
-					StartLocation: Location{Lat: 50.8466, Lng: 4.3528},
-					EndLocation:   Location{Lat: 50.7847, Lng: 4.2461},
-					PauseMinutes:  60,
-				},
-				{
-					StartLocation: Location{Lat: 50.7847, Lng: 4.2461},
-					EndLocation:   Location{Lat: 50.9011, Lng: 4.4844},
-					PauseMinutes:  0,
-				},
-			},
-		},
-		{
-			Legs: []TripLeg{
-				{
-					StartLocation: Location{Lat: 50.8466, Lng: 4.3928},
-					EndLocation:   Location{Lat: 50.8098, Lng: 4.3542},
-					PauseMinutes:  0,
-				},
-			},
-		},
-	}
-}
 
 func newHTTPClient(timeout time.Duration) *http.Client {
 	dialer := net.Dialer{
@@ -673,36 +644,124 @@ func newHTTPClient(timeout time.Duration) *http.Client {
 	return client
 }
 
-func main() {
-	fmt.Println("Poppy Journey Planner")
-	fmt.Println("====================")
+type APIResponse struct {
+	Success bool        `json:"success"`
+	Data    interface{} `json:"data,omitempty"`
+	Error   string      `json:"error,omitempty"`
+}
 
-	scenarios := getTestScenarios()
-	scenarioNames := []string{
-		"Jane: Brussels South Station → Stephanie/Louise (2h pause) → Flagey",
-		"John: Brussels Center → Dilbeek (1h pause) → Airport",
-		"Vicky: Wezembeek → Avenue de l'Observatoire, Uccle",
-	}
+func respondJSON(w http.ResponseWriter, status int, response APIResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(response)
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-
-	defer cancel()
-
-	client := newHTTPClient(10 * time.Second)
-
-	for i, scenario := range scenarios {
-		fmt.Printf("\n\n🚗 SCENARIO %d: %s\n", i+1, scenarioNames[i])
-		fmt.Println("=" + fmt.Sprintf("%*s", len(scenarioNames[i])+20, "="))
-
-		plan, err := planJourney(ctx, client, scenario)
-		if err != nil {
-			fmt.Printf("❌ Error planning journey: %v\n", err)
-
-			continue
+func planJourneyHandler(client *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			respondJSON(w, http.StatusMethodNotAllowed, APIResponse{
+				Success: false,
+				Error:   "Method not allowed",
+			})
+			return
 		}
 
-		printJourneyPlan(plan)
-	}
+		var requestData struct {
+			Journey Journey `json:"journey"`
+		}
 
-	fmt.Println("\n\n✅ All scenarios completed!")
+		if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+			respondJSON(w, http.StatusBadRequest, APIResponse{
+				Success: false,
+				Error:   "Invalid JSON request body",
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		plan, err := planJourney(ctx, client, requestData.Journey)
+		if err != nil {
+			respondJSON(w, http.StatusBadRequest, APIResponse{
+				Success: false,
+				Error:   err.Error(),
+			})
+			return
+		}
+
+		respondJSON(w, http.StatusOK, APIResponse{
+			Success: true,
+			Data:    plan,
+		})
+	}
+}
+
+func vehiclesHandler(client *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			respondJSON(w, http.StatusMethodNotAllowed, APIResponse{
+				Success: false,
+				Error:   "Method not allowed",
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		vehicles, err := fetchVehicles(ctx, client)
+		if err != nil {
+			respondJSON(w, http.StatusInternalServerError, APIResponse{
+				Success: false,
+				Error:   err.Error(),
+			})
+			return
+		}
+
+		respondJSON(w, http.StatusOK, APIResponse{
+			Success: true,
+			Data:    vehicles,
+		})
+	}
+}
+
+func healthHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			respondJSON(w, http.StatusMethodNotAllowed, APIResponse{
+				Success: false,
+				Error:   "Method not allowed",
+			})
+			return
+		}
+
+		respondJSON(w, http.StatusOK, APIResponse{
+			Success: true,
+			Data: map[string]interface{}{
+				"status":  "healthy",
+				"version": "1.0.0",
+				"service": "poppy-journey-planner",
+			},
+		})
+	}
+}
+
+func main() {
+	client := newHTTPClient(10 * time.Second)
+
+	http.HandleFunc("/api/v1/plan-journey", planJourneyHandler(client))
+	http.HandleFunc("/api/v1/vehicles", vehiclesHandler(client))
+	http.HandleFunc("/api/v1/health", healthHandler())
+
+	port := "8080"
+	fmt.Printf("Starting Poppy Journey Planner API on port %s\n", port)
+	fmt.Println("Endpoints:")
+	fmt.Println("  POST /api/v1/plan-journey")
+	fmt.Println("  GET  /api/v1/vehicles")
+	fmt.Println("  GET  /api/v1/health")
+
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		fmt.Printf("Failed to start server: %v\n", err)
+	}
 }
