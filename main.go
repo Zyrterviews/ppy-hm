@@ -994,7 +994,8 @@ func newHTTPClient(timeout time.Duration) *http.Client {
 		ExpectContinueTimeout: 1 * time.Second,
 		DisableCompression:    true,
 		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: true,
 		},
 	}
 
