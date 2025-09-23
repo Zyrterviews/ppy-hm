@@ -11,13 +11,44 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geojson"
 	"github.com/paulmach/orb/planar"
+)
+
+type pricingPlan string
+
+const (
+	pricingPlanPerMinute    pricingPlan = "pricingPlanPerMinute"
+	pricingPlanPerKilometer pricingPlan = "pricingPlanPerKilometer"
+	pricingPlanSmart        pricingPlan = "pricingPlanSmart"
+)
+
+func (p pricingPlan) DisplayName() string {
+	switch p {
+	case pricingPlanPerMinute:
+		return "Per Minute"
+	case pricingPlanPerKilometer:
+		return "Per Kilometer"
+	case pricingPlanSmart:
+		return "Smart Pricing"
+	default:
+		return string(p)
+	}
+}
+
+type vehicleModelType string
+
+// NOTE: Values must match Poppy API vehicle model types
+const (
+	vehicleModelTypeCar vehicleModelType = "car"
+	vehicleModelTypeVan vehicleModelType = "van"
 )
 
 type Location struct {
@@ -42,28 +73,28 @@ type Vehicle struct {
 }
 
 type Model struct {
-	Type   string `json:"type"`
-	Make   string `json:"make"`
-	Name   string `json:"name"`
-	Energy string `json:"energy"`
-	Tier   string `json:"tier"`
+	Type   vehicleModelType `json:"type"`
+	Make   string           `json:"make"`
+	Name   string           `json:"name"`
+	Energy string           `json:"energy"`
+	Tier   string           `json:"tier"`
 }
 
 type PricingModel struct {
-	UUID               string `json:"uuid"`
-	Tier               string `json:"tier"`
-	ModelType          string `json:"modelType"`
-	UnlockFee          int    `json:"unlockFee"`
-	MinutePrice        int    `json:"minutePrice"`
-	PauseUnitPrice     int    `json:"pauseUnitPrice"`
-	KilometerPrice     int    `json:"kilometerPrice"`
-	BookUnitPrice      int    `json:"bookUnitPrice"`
-	HourCapPrice       int    `json:"hourCapPrice"`
-	DayCapPrice        int    `json:"dayCapPrice"`
-	IncludedKilometers int    `json:"includedKilometers"`
-	Type               string `json:"type"`
-	MoveUnitPrice      int    `json:"moveUnitPrice"`
-	OverKilometerPrice int    `json:"overKilometerPrice"`
+	UUID               string      `json:"uuid"`
+	Tier               string      `json:"tier"`
+	ModelType          string      `json:"modelType"`
+	UnlockFee          int         `json:"unlockFee"`
+	MinutePrice        int         `json:"minutePrice"`
+	PauseUnitPrice     int         `json:"pauseUnitPrice"`
+	KilometerPrice     int         `json:"kilometerPrice"`
+	BookUnitPrice      int         `json:"bookUnitPrice"`
+	HourCapPrice       int         `json:"hourCapPrice"`
+	DayCapPrice        int         `json:"dayCapPrice"`
+	IncludedKilometers int         `json:"includedKilometers"`
+	Type               pricingPlan `json:"type"`
+	MoveUnitPrice      int         `json:"moveUnitPrice"`
+	OverKilometerPrice int         `json:"overKilometerPrice"`
 }
 
 type PricingResponse struct {
@@ -98,11 +129,13 @@ type Journey struct {
 }
 
 type JourneyPlan struct {
-	Vehicle       Vehicle       `json:"vehicle"`
-	Journey       Journey       `json:"journey"`
-	TotalCost     float64       `json:"totalCost"`
-	CostBreakdown CostBreakdown `json:"costBreakdown"`
-	PricingModel  string        `json:"pricingModel"`
+	Vehicle             Vehicle       `json:"vehicle"`
+	Journey             Journey       `json:"journey"`
+	TotalCost           float64       `json:"totalCost"`
+	CostBreakdown       CostBreakdown `json:"costBreakdown"`
+	PricingModel        pricingPlan   `json:"pricingModel"`
+	UsedFallbackRouting bool          `json:"usedFallbackRouting"`
+	RoutingWarning      string        `json:"routingWarning,omitempty"`
 }
 
 type CostBreakdown struct {
@@ -113,13 +146,27 @@ type CostBreakdown struct {
 	WalkingTime float64 `json:"walkingTimeMinutes"`
 }
 
+type orsResponse struct {
+	Routes []orsRoute `json:"routes"`
+}
+
+type orsRoute struct {
+	Summary orsSummary `json:"summary"`
+}
+
+type orsSummary struct {
+	DurationSeconds float64 `json:"duration"`
+}
+
 const (
 	averageWalkingSpeedKmh = 5.0
-	drivingSpeedKmh        = 25.0
+	averageDrivingSpeedKmh = 25.0
 	freeBookingMinutes     = 15
 	priceUnitFactor        = 1000.0
 	brusselsUUID           = "a88ea9d0-3d5e-4002-8bbf-775313a5973c"
 	apiURL                 = "https://poppy.red/api/v3"
+	orsBaseURL             = "https://api.openrouteservice.org/v2/directions"
+	orsTimeout             = 5 * time.Second
 )
 
 func fetchVehicles(
@@ -161,7 +208,7 @@ func fetchVehicles(
 	var cars []Vehicle
 
 	for _, vehicle := range vehicles {
-		if vehicle.Model.Type != "car" {
+		if vehicle.Model.Type != vehicleModelTypeCar {
 			continue
 		}
 
@@ -174,7 +221,8 @@ func fetchVehicles(
 func fetchPricing(
 	ctx context.Context,
 	client *http.Client,
-	modelType, tier string,
+	modelType vehicleModelType,
+	tier string,
 ) (*PricingResponse, error) {
 	targetURL, err := url.JoinPath(apiURL, "pricing", "pay-per-use")
 	if err != nil {
@@ -187,7 +235,7 @@ func fetchPricing(
 	}
 
 	query := parsedURL.Query()
-	query.Set("modelType", modelType)
+	query.Set("modelType", string(modelType))
 	query.Set("tier", tier)
 	parsedURL.RawQuery = query.Encode()
 
@@ -258,6 +306,77 @@ func fetchGeoZone(
 	}
 
 	return &geozone, nil
+}
+
+func fetchORSRoute(
+	ctx context.Context,
+	client *http.Client,
+	fromLat float64,
+	fromLng float64,
+	toLat float64,
+	toLng float64,
+	profile string,
+) (float64, error) {
+	apiKey := os.Getenv("ORS_API_KEY")
+	if apiKey == "" {
+		return 0, errors.New("ORS_API_KEY not set")
+	}
+
+	targetURL, err := url.JoinPath(orsBaseURL, profile, "json")
+	if err != nil {
+		return 0, fmt.Errorf("[fetchORSRoute] could not parse URL: %w", err)
+	}
+
+	requestBody := map[string]any{
+		"coordinates": [][]float64{
+			{fromLng, fromLat},
+			{toLng, toLat},
+		},
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return 0, fmt.Errorf("[fetchORSRoute] error marshaling request: %w", err)
+	}
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, orsTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(
+		ctxWithTimeout,
+		http.MethodPost,
+		targetURL,
+		strings.NewReader(string(jsonData)),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("[fetchORSRoute] error creating request: %w", err)
+	}
+
+	req.Header.Set("Authorization", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	res, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("[fetchORSRoute] request failed: %w", err)
+	}
+
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("[fetchORSRoute] API returned status %d", res.StatusCode)
+	}
+
+	var orsResp orsResponse
+	if err := json.NewDecoder(res.Body).Decode(&orsResp); err != nil {
+		return 0, fmt.Errorf("[fetchORSRoute] error decoding response: %w", err)
+	}
+
+	if len(orsResp.Routes) == 0 {
+		return 0, errors.New("[fetchORSRoute] no routes found")
+	}
+
+	return orsResp.Routes[0].Summary.DurationSeconds / 60, nil
 }
 
 func calculateDistance(lat1, lng1, lat2, lng2 float64) float64 {
@@ -340,7 +459,24 @@ func vehicleToLocation(vehicle Vehicle) Location {
 	}
 }
 
-func calculateWalkingTime(fromLocation, toLocation Location) float64 {
+func calculateWalkingTime(
+	ctx context.Context,
+	client *http.Client,
+	fromLocation Location,
+	toLocation Location,
+) (walkingTime float64, isApproximate bool) {
+	if duration, err := fetchORSRoute(
+		ctx,
+		client,
+		fromLocation.Lat,
+		fromLocation.Lng,
+		toLocation.Lat,
+		toLocation.Lng,
+		"foot-walking",
+	); err == nil {
+		return duration, false
+	}
+
 	distance := calculateDistance(
 		fromLocation.Lat,
 		fromLocation.Lng,
@@ -348,10 +484,27 @@ func calculateWalkingTime(fromLocation, toLocation Location) float64 {
 		toLocation.Lng,
 	)
 
-	return (distance / averageWalkingSpeedKmh) * 60
+	return (distance / averageWalkingSpeedKmh) * 60, true
 }
 
-func calculateDrivingTime(fromLocation, toLocation Location) float64 {
+func calculateDrivingTime(
+	ctx context.Context,
+	client *http.Client,
+	fromLocation Location,
+	toLocation Location,
+) (drivingTime float64, isApproximate bool) {
+	if duration, err := fetchORSRoute(
+		ctx,
+		client,
+		fromLocation.Lat,
+		fromLocation.Lng,
+		toLocation.Lat,
+		toLocation.Lng,
+		"driving-car",
+	); err == nil {
+		return duration, false
+	}
+
 	distance := calculateDistance(
 		fromLocation.Lat,
 		fromLocation.Lng,
@@ -359,10 +512,12 @@ func calculateDrivingTime(fromLocation, toLocation Location) float64 {
 		toLocation.Lng,
 	)
 
-	return (distance / drivingSpeedKmh) * 60
+	return (distance / averageDrivingSpeedKmh) * 60, true
 }
 
 func calculateCost(
+	ctx context.Context,
+	client *http.Client,
 	journey Journey,
 	vehicle Vehicle,
 	pricing *PricingResponse,
@@ -370,33 +525,39 @@ func calculateCost(
 ) (*JourneyPlan, error) {
 	plans := []JourneyPlan{}
 
-	perMinutePlan := calculateCostForModel(
+	perMinutePlan := calculateCostForPricingPlan(
+		ctx,
+		client,
 		journey,
 		vehicle,
 		pricing.PricingPerMinute,
-		"per-minute",
+		pricingPlanPerMinute,
 		geozone,
 	)
 	if perMinutePlan != nil {
 		plans = append(plans, *perMinutePlan)
 	}
 
-	perKilometerPlan := calculateCostForModel(
+	perKilometerPlan := calculateCostForPricingPlan(
+		ctx,
+		client,
 		journey,
 		vehicle,
 		pricing.PricingPerKilometer,
-		"per-kilometer",
+		pricingPlanPerKilometer,
 		geozone,
 	)
 	if perKilometerPlan != nil {
 		plans = append(plans, *perKilometerPlan)
 	}
 
-	smartPlan := calculateCostForModel(
+	smartPlan := calculateCostForPricingPlan(
+		ctx,
+		client,
 		journey,
 		vehicle,
 		pricing.SmartPricing,
-		"smart",
+		pricingPlanSmart,
 		geozone,
 	)
 	if smartPlan != nil {
@@ -409,19 +570,23 @@ func calculateCost(
 
 	cheapest := plans[0]
 	for _, plan := range plans[1:] {
-		if plan.TotalCost < cheapest.TotalCost {
-			cheapest = plan
+		if plan.TotalCost > cheapest.TotalCost {
+			continue
 		}
+
+		cheapest = plan
 	}
 
 	return &cheapest, nil
 }
 
-func calculateCostForModel(
+func calculateCostForPricingPlan(
+	ctx context.Context,
+	client *http.Client,
 	journey Journey,
 	vehicle Vehicle,
 	pricing PricingModel,
-	modelName string,
+	plan pricingPlan,
 	geozone *GeoZone,
 ) *JourneyPlan {
 	if len(journey.Legs) == 0 {
@@ -439,23 +604,29 @@ func calculateCostForModel(
 		totalPauseMinutes   float64
 		totalDistanceKm     float64
 		walkingTime         float64
+		usedApproximateRouting bool
 	)
 
 	startLocation := journey.Legs[0].StartLocation
 	vehicleLocation := vehicleToLocation(vehicle)
-	walkingTime = calculateWalkingTime(startLocation, vehicleLocation)
+	walkingTime, isApproximate := calculateWalkingTime(ctx, client, startLocation, vehicleLocation)
 	breakdown.WalkingTime = walkingTime
+	usedApproximateRouting = usedApproximateRouting || isApproximate
 
 	currentLocation := vehicleLocation
 
 	for _, leg := range journey.Legs {
-		walkToVehicleTime := calculateWalkingTime(
+		walkToVehicleTime, isApproximate := calculateWalkingTime(
+			ctx,
+			client,
 			currentLocation,
 			leg.StartLocation,
 		)
 		totalBookingMinutes += walkToVehicleTime
+		usedApproximateRouting = usedApproximateRouting || isApproximate
 
-		drivingTime := calculateDrivingTime(leg.StartLocation, leg.EndLocation)
+		drivingTime, isApproximate := calculateDrivingTime(ctx, client, leg.StartLocation, leg.EndLocation)
+		usedApproximateRouting = usedApproximateRouting || isApproximate
 		totalTravelMinutes += drivingTime
 
 		distance := calculateDistance(
@@ -468,6 +639,7 @@ func calculateCostForModel(
 
 		if leg.PauseMinutes > 0 {
 			pauseMinutes := float64(leg.PauseMinutes)
+
 			if isInParkingZone(leg.EndLocation, geozone) {
 				totalPauseMinutes += pauseMinutes
 			} else {
@@ -479,6 +651,7 @@ func calculateCostForModel(
 	}
 
 	finalLocation := journey.Legs[len(journey.Legs)-1].EndLocation
+
 	if geozone != nil && !isInParkingZone(finalLocation, geozone) {
 		return nil
 	}
@@ -492,17 +665,22 @@ func calculateCostForModel(
 	) / priceUnitFactor
 
 	switch pricing.Type {
-	case "minute":
+	case pricingPlanPerMinute:
 		breakdown.TravelCost = totalTravelMinutes * float64(
 			pricing.MinutePrice,
 		) / priceUnitFactor
-	case "kilometer":
+
+	case pricingPlanPerKilometer:
 		includedKm := float64(pricing.IncludedKilometers)
 		chargeableKm := math.Max(0, totalDistanceKm-includedKm)
 		breakdown.TravelCost = chargeableKm * float64(
 			pricing.KilometerPrice,
 		) / priceUnitFactor
-	case "smart":
+
+	case pricingPlanSmart:
+		fallthrough
+
+	default:
 		minuteCost := totalTravelMinutes * float64(
 			pricing.MinutePrice,
 		) / priceUnitFactor
@@ -525,12 +703,19 @@ func calculateCostForModel(
 		totalCost = dayCapCost
 	}
 
+	var routingWarning string
+	if usedApproximateRouting {
+		routingWarning = "Using estimated travel times (OpenRouteService unavailable)"
+	}
+
 	return &JourneyPlan{
-		Vehicle:       vehicle,
-		Journey:       journey,
-		TotalCost:     totalCost,
-		CostBreakdown: breakdown,
-		PricingModel:  modelName,
+		Vehicle:             vehicle,
+		Journey:             journey,
+		TotalCost:           totalCost,
+		CostBreakdown:       breakdown,
+		PricingModel:        plan,
+		UsedFallbackRouting: usedApproximateRouting,
+		RoutingWarning:      routingWarning,
 	}
 }
 
@@ -580,7 +765,7 @@ func planJourney(
 		geozone = nil
 	}
 
-	plan, err := calculateCost(journey, *closestVehicle, pricing, geozone)
+	plan, err := calculateCost(ctx, client, journey, *closestVehicle, pricing, geozone)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate cost: %w", err)
 	}
@@ -835,6 +1020,8 @@ func respondJSON(w http.ResponseWriter, status int, response APIResponse) {
 }
 
 func main() {
+	_ = godotenv.Load()
+	
 	client := newHTTPClient(10 * time.Second)
 
 	mux := http.NewServeMux()

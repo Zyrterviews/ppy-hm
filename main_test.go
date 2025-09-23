@@ -226,7 +226,7 @@ func TestCalculateWalkingTime(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			result := calculateWalkingTime(test.from, test.to)
+			result, _ := calculateWalkingTime(nil, nil, test.from, test.to)
 			if result < test.expectedMin || result > test.expectedMax {
 				t.Errorf("Expected walking time in range [%.2f, %.2f] but got %.2f",
 					test.expectedMin, test.expectedMax, result)

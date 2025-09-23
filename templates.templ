@@ -136,9 +136,14 @@ templ LegForm(legNumber int) {
 templ JourneyResult(plan *JourneyPlan) {
 	<div class="result success">
 		<h2>✅ Journey Planned Successfully!</h2>
+		if plan.UsedFallbackRouting {
+			<div style="background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px; padding: 10px; margin-bottom: 15px; color: #92400e;">
+				⚠️ { plan.RoutingWarning }
+			</div>
+		}
 		<p><strong>Vehicle:</strong> { plan.Vehicle.Model.Make } { plan.Vehicle.Model.Name } ({ plan.Vehicle.Plate })</p>
 		<p><strong>Total Cost:</strong> €{ fmt.Sprintf("%.2f", plan.TotalCost) }</p>
-		<p><strong>Pricing Model:</strong> { plan.PricingModel }</p>
+		<p><strong>Pricing Model:</strong> { plan.PricingModel.DisplayName() }</p>
 		<div class="breakdown">
 			<div class="breakdown-item">
 				<div class="value">€{ fmt.Sprintf("%.2f", plan.CostBreakdown.UnlockFee) }</div>
