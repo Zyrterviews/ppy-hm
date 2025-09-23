@@ -114,12 +114,12 @@ type CostBreakdown struct {
 }
 
 const (
-	walkingSpeedKmh    = 5.0
-	drivingSpeedKmh    = 25.0
-	freeBookingMinutes = 15
-	priceUnitFactor    = 1000.0
-	brusselsUUID       = "a88ea9d0-3d5e-4002-8bbf-775313a5973c"
-	apiURL             = "https://poppy.red/api/v3"
+	averageWalkingSpeedKmh = 5.0
+	drivingSpeedKmh        = 25.0
+	freeBookingMinutes     = 15
+	priceUnitFactor        = 1000.0
+	brusselsUUID           = "a88ea9d0-3d5e-4002-8bbf-775313a5973c"
+	apiURL                 = "https://poppy.red/api/v3"
 )
 
 func fetchVehicles(
@@ -261,18 +261,21 @@ func fetchGeoZone(
 }
 
 func calculateDistance(lat1, lng1, lat2, lng2 float64) float64 {
-	const R = 6371
+	const earthRadiusKm = 6371
 
-	dLat := (lat2 - lat1) * math.Pi / 180
-	dLng := (lng2 - lng1) * math.Pi / 180
+	latDiffRadians := (lat2 - lat1) * math.Pi / 180
+	lngDiffRadians := (lng2 - lng1) * math.Pi / 180
 
-	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+	haversineA := math.Sin(latDiffRadians/2)*math.Sin(latDiffRadians/2) +
 		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*
-			math.Sin(dLng/2)*math.Sin(dLng/2)
+			math.Sin(lngDiffRadians/2)*math.Sin(lngDiffRadians/2)
 
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	centralAngle := 2 * math.Atan2(
+		math.Sqrt(haversineA),
+		math.Sqrt(1-haversineA),
+	)
 
-	return R * c
+	return earthRadiusKm * centralAngle
 }
 
 func isInParkingZone(location Location, geozone *GeoZone) bool {
@@ -283,17 +286,19 @@ func isInParkingZone(location Location, geozone *GeoZone) bool {
 	point := orb.Point{location.Lng, location.Lat}
 
 	for _, item := range *geozone {
-		if item.GeofencingType == "parking" && item.ModelType == "car" {
-			switch geom := item.Geom.Geometry.Geometry().(type) {
-			case orb.Polygon:
-				if planar.PolygonContains(geom, point) {
+		if item.GeofencingType != "parking" || item.ModelType != "car" {
+			continue
+		}
+
+		switch geom := item.Geom.Geometry.Geometry().(type) {
+		case orb.Polygon:
+			if planar.PolygonContains(geom, point) {
+				return true
+			}
+		case orb.MultiPolygon:
+			for _, polygon := range geom {
+				if planar.PolygonContains(polygon, point) {
 					return true
-				}
-			case orb.MultiPolygon:
-				for _, polygon := range geom {
-					if planar.PolygonContains(polygon, point) {
-						return true
-					}
 				}
 			}
 		}
@@ -316,10 +321,13 @@ func findClosestVehicle(location Location, vehicles []Vehicle) *Vehicle {
 			location.Lat, location.Lng,
 			vehicles[i].LocationLatitude, vehicles[i].LocationLongitude,
 		)
-		if distance < minDistance {
-			minDistance = distance
-			closest = &vehicles[i]
+
+		if distance > minDistance {
+			continue
 		}
+
+		minDistance = distance
+		closest = &vehicles[i]
 	}
 
 	return closest
@@ -340,7 +348,7 @@ func calculateWalkingTime(fromLocation, toLocation Location) float64 {
 		toLocation.Lng,
 	)
 
-	return (distance / walkingSpeedKmh) * 60
+	return (distance / averageWalkingSpeedKmh) * 60
 }
 
 func calculateDrivingTime(fromLocation, toLocation Location) float64 {
