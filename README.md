@@ -14,14 +14,14 @@ A journey planning and cost estimation tool for Poppy car sharing service. The a
 
 ## Architecture
 
-The application is built in Go with a clean separation between business logic and presentation layers:
+The application is built in Go with a classic separation between business logic and presentation layers:
 
-- **Backend API client** for Poppy REST endpoints (vehicles, pricing, geozones)
+- **Backend API client** for Poppy JSON data endpoints (vehicles, pricing, geozones)
 - **Journey planning engine** with cost optimization algorithms
 - **Parking zone validation** using geometric point-in-polygon calculations  
 - **Route calculation** via OpenRouteService with graceful fallback
-- **Web frontend** using templ and HTMX for reactive user experience
-- **Comprehensive test suite** covering integration scenarios
+- **Web frontend** using templ and htmx for reactive UX
+- **Basic test suite** covering integration scenarios
 
 ## Quick Start
 
@@ -174,3 +174,5 @@ When OpenRouteService is unavailable, the system falls back to:
 ## Acknowledgments
 
 The frontend interface was generated using Claude Code (Anthropic's AI assistant) to rapidly prototype the user experience. The core business logic, API integration, and architectural decisions were developed collaboratively with AI assistance while maintaining hands-on oversight of implementation details and requirements compliance.
+
+The README is 99.9% AI generated (hey I wrote this line by hand!)
